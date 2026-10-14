@@ -2,7 +2,7 @@
    1. Keeps the app itself on the phone, so it opens with no signal.
    2. On Android (Background Sync), finishes queued uploads after the app is closed.
       iPhone has no Background Sync: there, the page uploads whenever it is open. */
-const SHELL = 'sd-shell-v2';           // bump on every release so phones pick up the new page
+const SHELL = 'sd-shell-v3';           // bump on every release so phones pick up the new page
 const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('sd-shell-') && k !== SHELL).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
