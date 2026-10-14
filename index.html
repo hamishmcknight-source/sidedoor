@@ -2891,7 +2891,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     }).catch(function () { setReach('offline'); return false; });
   }
   function keyProblem() {
-    setReach('offline');
+    S.keyBad = true; setReach('offline');
     $('jobsNote').textContent = CFG.host === 'gas' ? 'Sign in again to upload' : 'This link has been revoked. Ask for a new one';
   }
   function who(name) {
@@ -2902,7 +2902,20 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
 
   // ── sync edge + pill ──
   var stopBreath = null;
-  function setReach(r) { S.reach = r; paint(); }
+  function setReach(r) {
+    S.reach = r; paint();
+    clearTimeout(S.rtimer);
+    if (r === 'offline' && !S.keyBad) S.rtimer = setTimeout(function () {
+      if (document.visibilityState !== 'visible' || !navigator.onLine) return setReach('offline');
+      probe().then(function (ok) { if (ok) { fetchJobs(); flush(true); } });
+    }, 15000);
+  }
+  // one failed request isn't "no signal" (iPhone drops requests around the camera and on resume): confirm first
+  function recheck() {
+    if (!navigator.onLine) return setReach('offline');
+    clearTimeout(S.rtimer);
+    S.rtimer = setTimeout(function () { probe().then(function (ok) { if (ok) flush(true); }); }, 1500);
+  }
   function paint() {
     var edge = $('edge'), pill = $('syncPill');
     var s = S.reach === 'offline' ? 'offline' : S.queued ? 'working' : S.reach === 'online' ? 'online' : '';
@@ -2973,7 +2986,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
       if (changed || !$('jobs').querySelector('.job')) renderJobs();
       return true;
     }).catch(function () {
-      setReach('offline');
+      recheck();
       if (!$('jobs').querySelector('.job')) renderJobs();
       if (S.jobs.length) $('jobsNote').textContent = 'List may be out of date — no signal';
       return false;
@@ -3292,7 +3305,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
         });
       }, Promise.resolve()).then(function () { S.backoff = 0; setReach('online'); });
     }).catch(function (e) {
-      if (e && e.net) { if (navigator.onLine) probe(); S.backoff = Math.min((S.backoff || 2.5) * 2, 300); }
+      if (e && e.net) { recheck(); S.backoff = Math.min((S.backoff || 2.5) * 2, 300); }
     }).then(function () {
       S.flushing = false;
       return getItems().then(function (items) {
@@ -3395,7 +3408,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     .then(function () { flush(true); });
   addEventListener('online', function () { probe().then(function (ok) { if (ok) { fetchJobs(); flush(true); } }); });
   addEventListener('offline', function () { setReach('offline'); });
-  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { flush(true); if (navigator.onLine) fetchJobs(); } });
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') setTimeout(function () { flush(true); if (navigator.onLine) fetchJobs(); }, 1000); });
   window.onbeforeunload = function () { return S.busy ? 'Photos are still saving' : undefined; };
 })();
 </script>
