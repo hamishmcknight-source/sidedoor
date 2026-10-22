@@ -2883,6 +2883,8 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
       .catch(function (e) { if (e.net === undefined) e.net = true; throw e; })
       .finally(function () { clearTimeout(to); });
   }
+  // a refusal that no resend can fix (the server validated and said no), unlike a Drive or lock hiccup that can pass next time
+  function fatal(err) { return /^(bad |unknown op|too big)/.test(String(err || '')); }
   function probe() {
     if (!navigator.onLine) { setReach('offline'); return Promise.resolve(false); }
     return api({ op: 'ping' }, 8000).then(function (r) {
@@ -2914,7 +2916,8 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
   function recheck() {
     if (!navigator.onLine) return setReach('offline');
     clearTimeout(S.rtimer);
-    S.rtimer = setTimeout(function () { probe().then(function (ok) { if (ok) flush(true); }); }, 1500);
+    // reachable again: resume after the backoff (capped at 60 s), so a photo that fails on its own can't be hammered
+    S.rtimer = setTimeout(function () { probe().then(function (ok) { if (ok) { clearTimeout(S.timer); S.timer = setTimeout(flush, Math.min(S.backoff || 0, 60) * 1000); } }); }, 1500);
   }
   function paint() {
     var edge = $('edge'), pill = $('syncPill');
@@ -3010,7 +3013,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     gate();
   }
   function restoreJob() {
-    try { var id = localStorage.getItem('sd-job-' + EPOCH); if (!id) return; var j = S.jobs.filter(function (x) { return x.jobId === id; })[0]; if (j) { S.job = j; $('jobLbl').textContent = j.site; $('jobBtn').classList.add('set'); } } catch (e) {}
+    try { var id = new URLSearchParams(location.search).get('job') || localStorage.getItem('sd-job-' + EPOCH); if (!id) return;   /* ?job= from the desk preselects (2026-10-22) */ var j = S.jobs.filter(function (x) { return x.jobId === id; })[0]; if (j) { S.job = j; $('jobLbl').textContent = j.site; $('jobBtn').classList.add('set'); } } catch (e) {}
   }
 
   // ── the face: the camera until the first shot, then a mosaic of what you've got ──
@@ -3193,7 +3196,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     var item = {
       subId: newId(), jobId: S.job ? S.job.jobId : '', site: S.job ? S.job.site : '', kind: S.kind,
       note: $('note').value.trim(), capturedAt: new Date().toISOString(),
-      names: [], sent: [], committed: false, fails: 0, stuck: false, lastError: '', thumb: ''
+      names: [], sent: [], committed: false, fails: 0, netFails: 0, stuck: false, lastError: '', thumb: ''
     };
     var shots = S.shots.slice();
     shots.reduce(function (p, s, i) {
@@ -3246,6 +3249,9 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
   // ── upload queue: one photo per request, then commit. Never drops a capture. ──
   function countQueued(items) {
     S.queued = items.filter(function (i) { return !i.committed && !i.stuck; }).length; paint();
+    /* Opened from the desk with ?return=1: close once everything sent, landing back on the desk (2026-10-22) */
+    if (S.queued) S.hadQueue = true;
+    else if (S.hadQueue && S.reach === 'online' && new URLSearchParams(location.search).get('return') === '1') { S.hadQueue = false; setTimeout(function () { try { window.close(); } catch (e) {} }, 1500); }
     var now = new Date(), day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()), wk0 = new Date(day0 - 6 * 864e5);
     var today = items.filter(function (i) { return new Date(i.capturedAt) >= day0; }).length;
     var week = items.filter(function (i) { return new Date(i.capturedAt) >= wk0; }).length;
@@ -3261,8 +3267,8 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
           return b64(b).then(function (data) {
             return api({ op: 'put', subId: it.subId, jobId: it.jobId, kind: it.kind, name: name, mime: b.type || 'image/jpeg', b64: data }, 90000);
           }).then(function (r) {
-            if (!r.ok) { var e = new Error(r.error || 'server'); e.net = false; e.key = r.error === 'key'; throw e; }
-            it.sent[i] = true; it.fails = 0;
+            if (!r.ok) { var e = new Error(r.error || 'server'); e.net = false; e.key = r.error === 'key'; e.fatal = fatal(r.error); throw e; }
+            it.sent[i] = true; it.fails = 0; it.netFails = 0;
             setReach('online');
             return putItem(it).then(function () { renderRow(it, 'sending'); });
           });
@@ -3276,8 +3282,8 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
         r.missing.forEach(function (n) { var i = it.names.indexOf(n); if (i >= 0) it.sent[i] = false; });
         var e = new Error('missing ' + r.missing.join(', ')); e.net = false; throw e;
       }
-      if (!r.ok) { var e2 = new Error(r.error || 'server'); e2.net = false; e2.key = r.error === 'key'; throw e2; }
-      it.committed = true; it.lastError = ''; it.fails = 0;
+      if (!r.ok) { var e2 = new Error(r.error || 'server'); e2.net = false; e2.key = r.error === 'key'; e2.fatal = fatal(r.error); throw e2; }
+      it.committed = true; it.lastError = ''; it.fails = 0; it.netFails = 0;
       return Promise.all(it.names.map(function (n) { return delBlob(it.subId + '/' + n); })).then(function () { return putItem(it); });
     });
   }
@@ -3296,10 +3302,18 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
           renderRow(it, 'sending');
           return sendItem(it).then(function () { if (!S.dbOk) halo(); renderRow(it, 'sent'); countQueued(items); })
             .catch(function (e) {
-              if (e && e.net) { renderRow(it, 'waiting'); throw e; }          // connection: stop, retry later
               if (e && e.key) { renderRow(it, 'waiting'); keyProblem(); throw { net: true }; }   // key refused: keep everything, say so
-              it.fails = (it.fails || 0) + 1; it.lastError = String(e && e.message || e);
-              if (it.fails >= 8) it.stuck = true;                           // kept, never deleted: retry from the row
+              if (e && e.net) {                                             // connection: stop, retry later with backoff
+                // count it only when the server was just reachable, so a long outage never sticks a card;
+                // a photo that times out or 5xxs on every try still can't hold the queue forever
+                if (S.reach === 'online') it.netFails = (it.netFails || 0) + 1;
+                if ((it.netFails || 0) < 30) return putItem(it).then(function () { renderRow(it, 'waiting'); throw e; }, function () { renderRow(it, 'waiting'); throw e; });
+                it.stuck = true; it.lastError = 'Couldn\'t send \u2014 tap Retry';
+              } else {
+                it.fails = (it.fails || 0) + 1; it.lastError = String(e && e.message || e);
+                if (e && e.fatal) { it.stuck = true; it.lastError = 'Server refused: ' + it.lastError + ' \u2014 tap Retry once fixed'; }   // no point resending
+                else if (it.fails >= 8) it.stuck = true;                    // kept, never deleted: retry from the row
+              }
               return putItem(it).then(function () { renderRow(it); countQueued(items); });
             });
         });
@@ -3340,7 +3354,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     var pill = row.querySelector('.status');
     if (HSk && prev && prev !== state) HSk.status(pill, state === 'sent' ? 'done' : state === 'stuck' ? 'failed' : 'working');
     var r = row.querySelector('[data-act="retry"]'), x = row.querySelector('[data-act="discard"]');
-    if (r) r.onclick = function () { it.stuck = false; it.fails = 0; putItem(it).then(function () { renderRow(it); flush(true); }); };
+    if (r) r.onclick = function () { it.stuck = false; it.fails = 0; it.netFails = 0; putItem(it).then(function () { renderRow(it); flush(true); }); };
     if (x) x.onclick = function () {
       if (!confirm('Discard this capture? Its photos will be removed from this phone')) return;
       Promise.all(it.names.map(function (n) { return delBlob(it.subId + '/' + n); })).then(function () { return delItem(it.subId); }).then(function () { return renderRecent(); });
