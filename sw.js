@@ -2,7 +2,7 @@
    1. Keeps the app itself on the phone, so it opens with no signal.
    2. On Android (Background Sync), finishes queued uploads after the app is closed.
       iPhone has no Background Sync: there, the page uploads whenever it is open. */
-const SHELL = 'sd-shell-v6';           // bump on every release so phones pick up the new page
+const SHELL = 'sd-shell-v7';           // bump on every release so phones pick up the new page
 const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('sd-shell-') && k !== SHELL).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
@@ -35,12 +35,14 @@ async function drain() {
   if (!CFG) return;
   const items = (await req('items', 'readonly', s => s.getAll())) || [];
   for (const it of items.filter(i => !i.committed && !i.stuck).sort((a, b) => a.capturedAt < b.capturedAt ? -1 : 1)) {
-    for (let i = 0; i < it.names.length; i++) {
+    let next = 0;                                     // three photos at a time (2026-11-10); a throw still makes the browser retry later
+    const lane = async () => { for (let i; (i = next++) < it.names.length; ) {
       if (it.sent[i]) continue;
       const b = await req('blobs', 'readonly', s => s.get(it.subId + '/' + it.names[i]));
       if (b) { const r = await api({ op: 'put', subId: it.subId, jobId: it.jobId, kind: it.kind, name: it.names[i], mime: b.type || 'image/jpeg', b64: await b64(b) }); if (!r.ok) throw new Error(r.error || 'server'); }
       it.sent[i] = true; await req('items', 'readwrite', s => s.put(it));
-    }
+    } };
+    await Promise.all([lane(), lane(), lane()]);
     const c = await api({ op: 'commit', subId: it.subId, jobId: it.jobId, site: it.site, kind: it.kind, note: it.note, names: it.names, capturedAt: it.capturedAt });
     if (!c.ok) throw new Error(c.error || 'commit');
     it.committed = true; await req('items', 'readwrite', s => s.put(it));

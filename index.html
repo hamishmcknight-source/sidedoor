@@ -3257,24 +3257,39 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     var week = items.filter(function (i) { return new Date(i.capturedAt) >= wk0; }).length;
     $('recN').textContent = S.queued ? S.queued + ' sending' : today ? today + ' today' : week ? week + ' this week' : '';
   }
+  var SEND_PAR = 4, WL = null;
+  // Keep the screen on only while photos are actually going up (an iPhone stops a web app's uploads when it locks).
+  function wake(on) {
+    try {
+      if (on) { if (!WL && navigator.wakeLock && document.visibilityState === 'visible') navigator.wakeLock.request('screen').then(function (l) { WL = l; l.addEventListener('release', function () { if (WL === l) WL = null; }); }).catch(function () {}); }
+      else if (WL) { var l = WL; WL = null; l.release().catch(function () {}); }
+    } catch (e) {}
+  }
   function sendItem(it) {
-    var chain = Promise.resolve();
-    it.names.forEach(function (name, i) {
-      chain = chain.then(function () {
-        if (it.sent[i]) return;
-        return getBlob(it.subId + '/' + name).then(function (b) {
-          if (!b) { it.sent[i] = true; return putItem(it); }
-          return b64(b).then(function (data) {
-            return api({ op: 'put', subId: it.subId, jobId: it.jobId, kind: it.kind, name: name, mime: b.type || 'image/jpeg', b64: data }, 90000);
-          }).then(function (r) {
-            if (!r.ok) { var e = new Error(r.error || 'server'); e.net = false; e.key = r.error === 'key'; e.fatal = fatal(r.error); throw e; }
-            it.sent[i] = true; it.fails = 0; it.netFails = 0;
-            setReach('online');
-            return putItem(it).then(function () { renderRow(it, 'sending'); });
-          });
+    // Several photos go up at once (2026-11-10): the server stores each photo on its own, and one at a time measured
+    // about 10 s a photo. Any connection trouble drops this phone back to one at a time until the queue has emptied.
+    var next = 0, failed = null;
+    function one() {
+      if (failed) return Promise.resolve();
+      var i = next++;
+      if (i >= it.names.length) return Promise.resolve();
+      if (it.sent[i]) return one();
+      var name = it.names[i];
+      return getBlob(it.subId + '/' + name).then(function (b) {
+        if (!b) { it.sent[i] = true; return putItem(it); }
+        return b64(b).then(function (data) {
+          return api({ op: 'put', subId: it.subId, jobId: it.jobId, kind: it.kind, name: name, mime: b.type || 'image/jpeg', b64: data }, 90000);
+        }).then(function (r) {
+          if (!r.ok) { var e = new Error(r.error || 'server'); e.net = false; e.key = r.error === 'key'; e.fatal = fatal(r.error); throw e; }
+          it.sent[i] = true; it.fails = 0; it.netFails = 0;
+          setReach('online');
+          return putItem(it).then(function () { renderRow(it, 'sending'); });
         });
-      });
-    });
+      }).then(one, function (e) { if (!failed) failed = e; if (e && e.net) S.par = 1; });
+    }
+    var lanes = [], nLanes = Math.max(1, Math.min(S.par || SEND_PAR, it.names.length));
+    for (var k = 0; k < nLanes; k++) lanes.push(one());
+    var chain = Promise.all(lanes).then(function () { if (failed) throw failed; });
     return chain.then(function () {
       return api({ op: 'commit', subId: it.subId, jobId: it.jobId, site: it.site, kind: it.kind, note: it.note, names: it.names, capturedAt: it.capturedAt }, 30000);
     }).then(function (r) {
@@ -3295,8 +3310,9 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     getItems().then(function (items) {
       countQueued(items);
       var todo = items.filter(function (i) { return !i.committed && !i.stuck; }).sort(function (a, b) { return a.capturedAt < b.capturedAt ? -1 : 1; });
-      if (!todo.length) { S.flushing = false; S.backoff = 0; return; }
+      if (!todo.length) { S.flushing = false; S.backoff = 0; S.par = 0; return; }
       if (!navigator.onLine && !DEMO) { setReach('offline'); throw { net: true }; }
+      wake(true);
       return todo.reduce(function (p, it) {
         return p.then(function () {
           renderRow(it, 'sending');
@@ -3321,7 +3337,7 @@ dialog.ssheet:not([open]) { translate: var(--off) 0; opacity: var(--hs-sheet-o);
     }).catch(function (e) {
       if (e && e.net) { recheck(); S.backoff = Math.min((S.backoff || 2.5) * 2, 300); }
     }).then(function () {
-      S.flushing = false;
+      S.flushing = false; wake(false);
       return getItems().then(function (items) {
         countQueued(items);
         if (S.queued) S.timer = setTimeout(flush, (S.backoff || 5) * 1000);
